@@ -1,0 +1,490 @@
+<!doctype html><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Sphere Guide (Offline)</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#0b0c10;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+  canvas{width:100vw;height:100vh;display:block;touch-action:none}
+  #ui{position:fixed;top:12px;left:12px;padding:10px 12px;border-radius:10px;
+      background:rgba(20,22,30,.75);border:1px solid rgba(255,255,255,.12);color:#fff;font-size:12px;user-select:none}
+  #ui .r{display:flex;align-items:center;gap:10px;margin:8px 0}
+  #ui label{opacity:.9;min-width:140px}
+  #ui input[type="range"]{width:160px}
+  #ui .tog{display:flex;gap:10px;margin:8px 0}
+  button{border:1px solid rgba(255,255,255,.16);background:rgba(255,255,255,.08);color:#fff;
+         border-radius:10px;padding:7px 10px;font-size:12px;cursor:pointer}
+  button:hover{background:rgba(255,255,255,.12)}
+  .dot{width:10px;height:10px;border-radius:50%;display:inline-block}
+  .val{opacity:.8;min-width:44px;text-align:right}
+</style>
+<canvas id="c"></canvas>
+<div id="ui">
+  <div class="r"><label>Great circles / axis</label><input id="density" type="range" min="4" max="72" step="4" value="4"></div>
+
+  <div class="r"><label>X rotation</label><input id="rx" type="range" min="-180" max="180" step="15" value="0"><span class="val" id="rxv">0°</span></div>
+  <div class="r"><label>Y rotation</label><input id="ry" type="range" min="-180" max="180" step="15" value="0"><span class="val" id="ryv">0°</span></div>
+  <div class="r"><label>Z rotation</label><input id="rz" type="range" min="-180" max="180" step="15" value="0"><span class="val" id="rzv">0°</span></div>
+  <div class="r"><label>Line opacity</label><input id="o" type="range" min="0.05" max="1" step="0.01" value="0.85"></div>
+
+  <div class="r" style="gap:8px;margin-top:10px">
+    <button id="png">Export PNG</button>
+    <button id="reset">Reset</button>
+  </div>
+</div>
+
+<script>
+(() => {
+  const c = document.getElementById('c'), ctx = c.getContext('2d');
+  const density = document.getElementById('density');
+  const opacity = document.getElementById('o');
+  const rx = document.getElementById('rx'), ry = document.getElementById('ry'), rz = document.getElementById('rz');
+  const rxv = document.getElementById('rxv'), ryv = document.getElementById('ryv'), rzv = document.getElementById('rzv');
+  const btnPng = document.getElementById('png'), btnReset = document.getElementById('reset');
+
+  const TAU = Math.PI*2, clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+
+  // Quaternion (w,x,y,z)
+  const qMul=(a,b)=>({w:a.w*b.w-a.x*b.x-a.y*b.y-a.z*b.z,
+                      x:a.w*b.x+a.x*b.w+a.y*b.z-a.z*b.y,
+                      y:a.w*b.y-a.x*b.z+a.y*b.w+a.z*b.x,
+                      z:a.w*b.z+a.x*b.y-a.y*b.x+a.z*b.w});
+  const qNorm=q=>{const n=Math.hypot(q.w,q.x,q.y,q.z)||1;q.w/=n;q.x/=n;q.y/=n;q.z/=n;return q;}
+  const qFromAxisAngle=(ax,ay,az,ang)=>{const h=ang*0.5,s=Math.sin(h),n=Math.hypot(ax,ay,az)||1;
+    return qNorm({w:Math.cos(h),x:(ax/n)*s,y:(ay/n)*s,z:(az/n)*s});}
+  const qRot=(q,v)=>{const qw=q.w,qx=q.x,qy=q.y,qz=q.z;
+    const tx=2*(qy*v.z-qz*v.y), ty=2*(qz*v.x-qx*v.z), tz=2*(qx*v.y-qy*v.x);
+    return {x:v.x+qw*tx+(qy*tz-qz*ty), y:v.y+qw*ty+(qz*tx-qx*tz), z:v.z+qw*tz+(qx*ty-qy*tx)};}
+
+  // View: looking along +Z, with +Y up, +X right => identity.
+  let baseRot0 = qNorm({w:1,x:0,y:0,z:0});
+  let userRot  = qNorm({w:1,x:0,y:0,z:0});  // drag rotation
+  let sliderRot= qNorm({w:1,x:0,y:0,z:0});  // snapped discrete rotation from sliders
+  let rot      = qNorm({w:1,x:0,y:0,z:0});  // combined
+  const recomputeRot=()=>{ rot = qNorm(qMul(qMul(sliderRot, userRot), baseRot0)); };
+
+  const qInv=(q)=>({w:q.w, x:-q.x, y:-q.y, z:-q.z}); // unit quaternion inverse
+  const qDot=(a,b)=>(a.w*b.w + a.x*b.x + a.y*b.y + a.z*b.z);
+
+  // Great-circle hit-testing cache (canvas px segments)
+  let circleHitSegs = [];
+
+  let W=0,H=0,cx=0,cy=0,R=0,zoom=1;
+  let panX=0, panY=0; // canvas-pixel pan offset
+  const SEG=220, ts=[...Array(SEG+1)].map((_,i)=>i/SEG*TAU);
+
+  function resize(){
+    const dpr=Math.max(1,Math.min(2,devicePixelRatio||1));
+    W=Math.floor(innerWidth*dpr); H=Math.floor(innerHeight*dpr);
+    c.width=W; c.height=H; c.style.width=innerWidth+"px"; c.style.height=innerHeight+"px";
+    cx=W/2; cy=H/2; R=Math.min(W,H)*0.42;
+  }
+  addEventListener('resize', resize, {passive:true}); resize();
+
+  // Front hemisphere is z >= 0 (+Z faces camera).
+  const proj=(v,ox=0,oy=0)=>{const s=R*zoom; return {x:cx+panX+v.x*s+ox,y:cy+panY-v.y*s+oy,z:v.z};}
+  const splitZ0=(a,b)=>{const d=b.z-a.z; if(Math.abs(d)<1e-9) return null; const t=(0-a.z)/d; return (t>0&&t<1)?t:null;}
+
+  function syncRotationSliders(){
+    // Rotation sliders are centered: -180° .. +180° in 15° increments.
+    const snap15 = (v)=>Math.round(v/15)*15;
+    const clamp180 = (v)=>Math.max(-180, Math.min(180, v));
+    const fix = (el)=>{
+      let v = parseFloat(el.value || "0");
+      v = clamp180(snap15(v));
+      el.value = String(v);
+    };
+    fix(rx); fix(ry); fix(rz);
+
+    const fmt = (v)=> `${v>0?'+':''}${v}°`;
+    rxv.textContent = fmt(parseInt(rx.value,10));
+    ryv.textContent = fmt(parseInt(ry.value,10));
+    rzv.textContent = fmt(parseInt(rz.value,10));
+  }
+
+  function updateSliderRotation(){
+    // Sliders are degrees (-180..180 step 15), applied about the SPHERE axes (body-fixed).
+    const toRad = d => d * Math.PI / 180;
+    const ax = toRad(parseInt(rx.value,10) || 0);
+    const ay = toRad(parseInt(ry.value,10) || 0);
+    const az = toRad(parseInt(rz.value,10) || 0);
+
+    const qx = qFromAxisAngle(1,0,0, ax);
+    const qy = qFromAxisAngle(0,1,0, ay);
+    const qz = qFromAxisAngle(0,0,1, az);
+
+    // Body-fixed rotations: X then Y then Z => q = qx * qy * qz
+    sliderRot = qNorm(qMul(qMul(qx, qy), qz));
+    recomputeRot();
+  }
+
+  // Decompose current combined rotation to nearest snapped steps for the sliders.
+  let updatingUI = false;
+  function bestSliderStepsForRotation(){
+    // Closest (rx,ry,rz) in 15° increments within [-180,180] to current rotation.
+    // Compare quaternions by maximizing |dot| (same rotation up to sign).
+    const steps = [-180,-165,-150,-135,-120,-105,-90,-75,-60,-45,-30,-15,0,15,30,45,60,75,90,105,120,135,150,165,180];
+    let best = {rx:0, ry:0, rz:0};
+    let bestScore = -1;
+
+    // Snap sliders to approximate the CURRENT overall sphere orientation (body-fixed axes).
+    const target = qNorm(qMul(rot, qInv(baseRot0)));
+    const toRad = d => d * Math.PI / 180;
+
+    for (let ix=0; ix<steps.length; ix++){
+      const qx = qFromAxisAngle(1,0,0, toRad(steps[ix]));
+      for (let iy=0; iy<steps.length; iy++){
+        const qy = qFromAxisAngle(0,1,0, toRad(steps[iy]));
+        for (let iz=0; iz<steps.length; iz++){
+          const qz = qFromAxisAngle(0,0,1, toRad(steps[iz]));
+          const cand = qNorm(qMul(qMul(qx,qy),qz)); // body-fixed
+          const score = Math.abs(qDot(cand, target));
+          if (score > bestScore){
+            bestScore = score;
+            best = {rx:steps[ix], ry:steps[iy], rz:steps[iz]};
+          }
+        }
+      }
+    }
+    return best;
+  }
+
+  function updateSlidersFromCurrentRotation(){
+    const b = bestSliderStepsForRotation();
+    updatingUI = true;
+    rx.value = String(b.rx);
+    ry.value = String(b.ry);
+    rz.value = String(b.rz);
+    updatingUI = false;
+    syncRotationSliders();
+  }
+
+  const onRotUI=()=>{
+    if(updatingUI) return;
+    syncRotationSliders();
+    updateSliderRotation();
+  };
+  density.addEventListener('input', onRotUI);
+  rx.addEventListener('input', onRotUI);
+  ry.addEventListener('input', onRotUI);
+  rz.addEventListener('input', onRotUI);
+
+  const resetAxisSlider = (el)=>{ el.value='0'; syncRotationSliders(); updateSliderRotation(); };
+  rx.addEventListener('dblclick', ()=>resetAxisSlider(rx));
+  ry.addEventListener('dblclick', ()=>resetAxisSlider(ry));
+  rz.addEventListener('dblclick', ()=>resetAxisSlider(rz));
+
+// Input
+let dragging=false, pid=null, lx=0, ly=0;
+let mode='none'; // 'none' | 'circleRotate' | 'pan'
+let activeNormal=null; // {x,y,z} in OBJECT space for the clicked great circle
+
+const toCanvasXY = (e)=>{
+  const sx = e.clientX * (c.width / innerWidth);
+  const sy = e.clientY * (c.height / innerHeight);
+  return {x:sx, y:sy};
+};
+
+const distPointSeg2 = (px,py,x1,y1,x2,y2)=>{
+  const vx=x2-x1, vy=y2-y1;
+  const wx=px-x1, wy=py-y1;
+  const c1 = vx*wx + vy*wy;
+  if(c1<=0) return (px-x1)*(px-x1)+(py-y1)*(py-y1);
+  const c2 = vx*vx + vy*vy;
+  if(c2<=c1) return (px-x2)*(px-x2)+(py-y2)*(py-y2);
+  const t = c1 / (c2||1);
+  const bx = x1 + t*vx, by = y1 + t*vy;
+  return (px-bx)*(px-bx)+(py-by)*(py-by);
+};
+
+const hitGreatCircle = (e)=>{
+  const p = toCanvasXY(e);
+  const dpr=Math.max(1,Math.min(2,devicePixelRatio||1));
+  const thresh2 = (7*dpr)*(7*dpr);
+
+  let best=null, bestD=1e18;
+
+  // Prefer front hemisphere segments (front=true) if both exist.
+  for(const seg of circleHitSegs){
+    const d2 = distPointSeg2(p.x,p.y, seg.x1,seg.y1,seg.x2,seg.y2);
+    if(d2<=thresh2){
+      const bias = seg.front ? 0 : 1e6; // make back segments lose unless nothing else fits
+      const score = d2 + bias;
+      if(score < bestD){
+        bestD = score;
+        best = seg;
+      }
+    }
+  }
+  return best; // {normal:{x,y,z}, front, ...}
+};
+
+// Disable the browser context menu so right-click can be used for panning.
+c.addEventListener('contextmenu', e=>{ e.preventDefault(); });
+
+c.addEventListener('pointerdown', e=>{
+  c.setPointerCapture(e.pointerId);
+  dragging=true; pid=e.pointerId; lx=e.clientX; ly=e.clientY;
+
+  if(e.button===2){
+    mode='pan';
+    return;
+  }
+
+  // Left click: rotate ONLY if a great-circle line was clicked.
+  const hit = hitGreatCircle(e);
+  if(hit){
+    mode='circleRotate';
+    activeNormal = hit.normal; // object-space normal of the clicked circle plane
+    c.style.cursor = 'grabbing';
+  }else{
+    mode='none';
+    activeNormal = null;
+  }
+});
+
+c.addEventListener('pointermove', e=>{
+  // Hover affordance (not dragging)
+  if(!dragging){
+    const hit = hitGreatCircle(e);
+    c.style.cursor = hit ? 'grab' : 'default';
+    return;
+  }
+
+  if(e.pointerId!==pid) return;
+  const dx=e.clientX-lx, dy=e.clientY-ly; lx=e.clientX; ly=e.clientY;
+
+  if(mode==='pan'){
+    // Convert CSS px -> canvas px (canvas is DPR-scaled)
+    const scaleX = c.width / innerWidth;
+    const scaleY = c.height / innerHeight;
+    panX += dx * scaleX;
+    panY += dy * scaleY;
+    return;
+  }
+
+  if(mode!=='circleRotate' || !activeNormal) return;
+
+  // Rotate the sphere around the axis normal to the clicked great circle.
+  // Make direction consistent by basing the signed angle on:
+  // (1) the *current* screen-space projection of the rotation axis, and
+  // (2) the drag vector.
+  //
+  // If the axis points "away" from the camera, the naive mapping can feel like it reverses.
+  // Using the 2D cross product between axis-projection and drag keeps it stable.
+  const minWH = Math.min(innerWidth, innerHeight);
+
+  // Camera-space axis (after current rotation).
+  const axisCam = qRot(rot, activeNormal);
+
+  // Project axis onto the screen plane (x,y). Compensate for screen Y being downward.
+  const ax = axisCam.x;
+  const ay = axisCam.y;
+  const aLen = Math.hypot(ax, ay);
+
+  // Drag vector in screen coords; convert to "world-ish" screen plane by flipping Y.
+  const vx = dx;
+  const vy = -dy;
+
+  // Signed amount of rotation: cross(axisProj, dragVec).
+  // Normalize so sensitivity doesn't explode when the axis is near screen-center.
+  const cross = (ax * vy - ay * vx);
+  const s = 2.8 / minWH;
+  const denom = Math.max(0.15, aLen);
+  const ang = -cross * s / denom;
+
+  const qA = qFromAxisAngle(activeNormal.x, activeNormal.y, activeNormal.z, ang);
+  userRot = qNorm(qMul(userRot, qA));
+  recomputeRot();
+  updateSlidersFromCurrentRotation();
+});
+
+c.addEventListener('pointerup', e=>{
+  if(e.pointerId===pid){
+    dragging=false; pid=null;
+    mode='none'; activeNormal=null;
+    c.style.cursor = 'default';
+  }
+});
+c.addEventListener('pointercancel', ()=>{
+  dragging=false; pid=null;
+  mode='none'; activeNormal=null;
+  c.style.cursor = 'default';
+});
+
+c.addEventListener('wheel',e=>{e.preventDefault(); zoom=clamp(zoom*Math.exp(-e.deltaY*0.0012),0.25,3.5);},{passive:false});
+
+  const reset=()=>{
+    zoom=1;
+    panX=0; panY=0;
+    userRot=qNorm({w:1,x:0,y:0,z:0});
+    rx.value='0'; ry.value='0'; rz.value='0';
+    syncRotationSliders();
+    updateSliderRotation();
+  };
+  c.addEventListener('dblclick',reset); btnReset.addEventListener('click',reset);
+
+  btnPng.addEventListener('click',()=>{
+    // High-res export without fattening the lines.
+    // Tweak this if you want even more pixels (2 = 2x the current canvas resolution).
+    const EXPORT_SCALE = 2;
+
+    // Save current canvas state
+    const oldW = c.width, oldH = c.height;
+    const oldStyleW = c.style.width, oldStyleH = c.style.height;
+    const oldPanX = panX, oldPanY = panY;
+
+    const dpr = Math.max(1, Math.min(2, devicePixelRatio||1));
+    const w = Math.floor(innerWidth * dpr * EXPORT_SCALE);
+    const h = Math.floor(innerHeight * dpr * EXPORT_SCALE);
+
+    // Upscale canvas for export
+    c.width = w; c.height = h;
+    c.style.width = innerWidth + 'px';
+    c.style.height = innerHeight + 'px';
+    W = w; H = h; cx = W/2; cy = H/2; R = Math.min(W,H)*0.42;
+
+    // Scale pan to match the larger pixel canvas
+    panX = oldPanX * EXPORT_SCALE;
+    panY = oldPanY * EXPORT_SCALE;
+
+    draw();
+
+    const a=document.createElement('a');
+    a.href=c.toDataURL('image/png');
+    a.download='sphere-guide@'+EXPORT_SCALE+'x.png';
+    document.body.appendChild(a); a.click(); a.remove();
+
+    // Restore canvas
+    c.width = oldW; c.height = oldH;
+    c.style.width = oldStyleW; c.style.height = oldStyleH;
+    W = oldW; H = oldH; cx = W/2; cy = H/2; R = Math.min(W,H)*0.42;
+    panX = oldPanX; panY = oldPanY;
+  });
+
+  function greatCircles(axis, color, on){
+    if(!on) return;
+
+    const dpr=Math.max(1,Math.min(2,devicePixelRatio||1));
+    const count=parseInt(density.value,10);
+    const baseA=parseFloat(opacity.value);
+    const lw = 1*dpr;
+
+    const backA=0.0, dash=[Math.max(3,lw*2.8), Math.max(3,lw*2.2)];
+
+    // Small screen-space separation to avoid perfect overlap
+    const sep=1.6*dpr*(lw/(1.6*dpr));
+    let ox=0,oy=0;
+    if(axis==='X'){ox= sep;} else if(axis==='Y'){ox=-sep;} else {oy= sep;}
+
+    // Ensure density=1 yields three principal planes:
+    // Y: XY (z=0) => phase 0
+    // X: XZ (y=0) => phase pi/2
+    // Z: YZ (x=0) => phase pi/2
+    const phase = (axis==='X') ? (TAU/4) : (axis==='Y') ? 0 : (TAU/4);
+
+    for(let i=0;i<count;i++){
+      const phi=i/count*TAU + phase;
+
+      let b,a;
+      if(axis==='X'){ a={x:1,y:0,z:0}; b={x:0,y:Math.cos(phi),z:Math.sin(phi)}; }
+      else if(axis==='Y'){ a={x:0,y:1,z:0}; b={x:Math.cos(phi),y:0,z:Math.sin(phi)}; }
+      else { a={x:0,y:0,z:1}; b={x:Math.cos(phi),y:Math.sin(phi),z:0}; }
+
+      // Object-space normal of this great circle plane (axis to rotate around when clicked)
+      const normal = {
+        x: a.y*b.z - a.z*b.y,
+        y: a.z*b.x - a.x*b.z,
+        z: a.x*b.y - a.y*b.x
+      };
+
+      const pts=[];
+      for(let k=0;k<=SEG;k++){
+        const t=ts[k], ct=Math.cos(t), st=Math.sin(t);
+        pts.push(qRot(rot,{x:ct*a.x+st*b.x,y:ct*a.y+st*b.y,z:ct*a.z+st*b.z}));
+      }
+
+      ctx.lineWidth=lw; ctx.strokeStyle=color;
+
+      for(let k=0;k<pts.length-1;k++){
+        const p0=pts[k], p1=pts[k+1];
+        const tc=splitZ0(p0,p1);
+
+        const segDraw=(A,B,front)=>{
+          // Back hemisphere: faint but visible.
+          ctx.globalAlpha = baseA * (front ? 1 : 0.10);
+          ctx.setLineDash([]);
+          const s0=proj(A,ox,oy), s1=proj(B,ox,oy);
+          // Hit-test segment for click-to-rotate (store both front/back, prefer front when selecting)
+          circleHitSegs.push({x1:s0.x,y1:s0.y,x2:s1.x,y2:s1.y, normal, front});
+          ctx.beginPath(); ctx.moveTo(s0.x,s0.y); ctx.lineTo(s1.x,s1.y); ctx.stroke();
+        };
+
+        if(tc==null){
+          segDraw(p0,p1,(p0.z>=0 && p1.z>=0));
+        }else{
+          const mid={x:p0.x+(p1.x-p0.x)*tc,y:p0.y+(p1.y-p0.y)*tc,z:0};
+          segDraw(p0,mid,(p0.z>=0));
+          segDraw(mid,p1,(p1.z>=0));
+        }
+      }
+    }
+    ctx.setLineDash([]); ctx.globalAlpha=1;
+  }
+
+  function markers(){
+    const dpr=Math.max(1,Math.min(2,devicePixelRatio||1));
+    const ms=[
+      {n:'+X',v:{x:1,y:0,z:0},c:'#ff3b3b'},{n:'-X',v:{x:-1,y:0,z:0},c:'#ff3b3b'},
+      {n:'+Y',v:{x:0,y:1,z:0},c:'#3bff65'},{n:'-Y',v:{x:0,y:-1,z:0},c:'#3bff65'},
+      {n:'+Z',v:{x:0,y:0,z:1},c:'#3b7bff'},{n:'-Z',v:{x:0,y:0,z:-1},c:'#3b7bff'}
+    ].map(m=>({...m,r:qRot(rot,m.v)})).sort((a,b)=>a.r.z-b.r.z); // back first (z<0), front last
+
+    ctx.save();
+    ctx.font=`${12*dpr}px system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif`;
+    ctx.textBaseline='middle';
+
+    for(const m of ms){
+      const front = m.r.z >= 0;
+      const a = front ? 1 : 0.10;
+
+      const msep=1.2*dpr;
+      let ox=0,oy=0;
+      if(m.n.endsWith('X')) ox= msep;
+      if(m.n.endsWith('Y')) ox=-msep;
+      if(m.n.endsWith('Z')) oy= msep;
+
+      const p=proj(m.r,ox,oy);
+      const r=(front?6.5:5.5)*dpr;
+
+      ctx.globalAlpha=a; ctx.fillStyle=m.c;
+      ctx.beginPath(); ctx.arc(p.x,p.y,r,0,TAU); ctx.fill();
+
+      ctx.globalAlpha=a*0.9; ctx.strokeStyle='rgba(0,0,0,0.55)'; ctx.lineWidth=2*dpr;
+      ctx.beginPath(); ctx.arc(p.x,p.y,r,0,TAU); ctx.stroke();
+
+      ctx.globalAlpha=a; ctx.fillStyle='rgba(255,255,255,0.92)';
+      ctx.strokeStyle='rgba(0,0,0,0.65)'; ctx.lineWidth=3*dpr;
+      const off=10*dpr, lx=p.x+m.r.x*off+(m.r.x>=0?6*dpr:-6*dpr), ly=p.y+(-m.r.y)*off;
+      ctx.textAlign=(m.r.x>=0)?'left':'right';
+      ctx.strokeText(m.n,lx,ly); ctx.fillText(m.n,lx,ly);
+    }
+    ctx.restore(); ctx.globalAlpha=1;
+  }
+
+  function draw(){
+    ctx.setTransform(1,0,0,1,0,0);
+    ctx.clearRect(0,0,W,H);
+    circleHitSegs = [];
+    greatCircles('X','#ff3b3b',true);
+    greatCircles('Y','#3bff65',true);
+    greatCircles('Z','#3b7bff',true);
+
+    markers();
+  }
+
+  // Init
+  syncRotationSliders();
+  updateSliderRotation();
+
+  (function loop(){ draw(); requestAnimationFrame(loop); })();
+})();
+</script>
