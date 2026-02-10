@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <title>Great Circles</title>
+  <style>
+    html, body { height: 100%; margin: 0; background:#fff; overflow:hidden; }
+    canvas { display:block; width:100vw; height:100vh; }
+    .hud {
+      position: fixed; left: 12px; top: 10px;
+      font: 13px/1.3 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: rgba(255,255,255,0.85);
+      border: 1px solid rgba(0,0,0,0.12);
+      border-radius: 8px;
+      padding: 8px 10px;
+      user-select: none;
+    }
+    .hud b { font-weight: 650; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="hud">
+  <b>Controls</b><br>
+  Drag a <b>great circle</b> to rotate<br>
+  Right-drag (desktop) / 2-finger drag (mobile) to pan<br>
+  Wheel (desktop) / pinch (mobile) to zoom
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+
+  // Helps on browsers that respect it; iOS still needs preventDefault in handlers.
+  canvas.style.touchAction = "none";
+
+  // ---------- Canvas sizing ----------
+  function resize() {
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    canvas.width  = Math.floor(innerWidth  * dpr);
+    canvas.height = Math.floor(innerHeight * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0); // draw in CSS pixels
+  }
+  addEventListener('resize', resize, { passive:true });
+  resize();
+
+  // ---------- Simple math helpers ----------
+  const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
+
+  function dot(a,b){ return a.x*b.x + a.y*b.y + a.z*b.z; }
+  function cross(a,b){
+    return { x: a.y*b.z - a.z*b.y, y: a.z*b.x - a.x*b.z, z: a.x*b.y - a.y*b.x };
+  }
+  function norm(v){
+    const L = Math.hypot(v.x,v.y,v.z) || 1;
+    return { x:v.x/L, y:v.y/L, z:v.z/L };
+  }
+  function scale(v,s){ return { x:v.x*s, y:v.y*s, z:v.z*s }; }
+  function add(a,b){ return { x:a.x+b.x, y:a.y+b.y, z:a.z+b.z }; }
+
+  // ---------- State ----------
+  let rot = { // world->camera, row-major
+    m: [1,0,0,
+        0,1,0,
+        0,0,1]
+  };
+
+  function mulMatVec(M, v){
+    const m = M.m;
+    return {
+      x: m[0]*v.x + m[1]*v.y + m[2]*v.z,
+      y: m[3]*v.x + m[4]*v.y + m[5]*v.z,
+      z: m[6]*v.x + m[7]*v.y + m[8]*v.z
+    };
+  }
+
+  function axisAngleToMatrix(k, theta){
+    const x=k.x,y=k.y,z=k.z, ct=Math.cos(theta), st=Math.sin(theta), vt=1-ct;
+    return { m: [
+      ct + x*x*vt,     x*y*vt - z*st, x*z*vt + y*st,
+      y*x*vt + z*st,   ct + y*y*vt,   y*z*vt - x*st,
+      z*x*vt - y*st,   z*y*vt + x*st, ct + z*z*vt
+    ]};
+  }
+
+  function mulMatMul(A,B){
+    const a=A.m,b=B.m;
+    return { m: [
+      a[0]*b[0]+a[1]*b[3]+a[2]*b[6],  a[0]*b[1]+a[1]*b[4]+a[2]*b[7],  a[0]*b[2]+a[1]*b[5]+a[2]*b[8],
+      a[3]*b[0]+a[4]*b[3]+a[5]*b[6],  a[3]*b[1]+a[4]*b[4]+a[5]*b[7],  a[3]*b[2]+a[4]*b[5]+a[5]*b[8],
+      a[6]*b[0]+a[7]*b[3]+a[8]*b[6],  a[6]*b[1]+a[7]*b[4]+a[8]*b[7],  a[6]*b[2]+a[7]*b[5]+a[8]*b[8],
+    ]};
+  }
+
+  function applyWorldAxisRotation(axisWorldUnit, angle){
+    const axisCam = norm(mulMatVec(rot, axisWorldUnit));
+    const R = axisAngleToMatrix(axisCam, angle);
+    rot = mulMatMul(R, rot);
+  }
+
+  let panX = 0, panY = 0;
+  let zoom = 1.0;
+  const baseRadius = 180;
+  const camDist = 3.2;
+  const persp = 1.2;
+
+  // ---------- Great circles ----------
+  const circles = [
+    { name: "YZ", n: norm({x:1,y:0,z:0}) },
+    { name: "XZ", n: norm({x:0,y:1,z:0}) },
+    { name: "XY", n: norm({x:0,y:0,z:1}) },
+    { name: "diag1", n: norm({x:1,y:1,z:0}) },
+    { name: "diag2", n: norm({x:1,y:0,z:1}) },
+    { name: "diag3", n: norm({x:0,y:1,z:1}) },
+  ];
+
+  function basisFromNormal(n){
+    const h = Math.abs(n.z) < 0.9 ? {x:0,y:0,z:1} : {x:0,y:1,z:0};
+    const u = norm(cross(h, n));
+    const v = norm(cross(n, u));
+    return {u,v};
+  }
+  circles.forEach(c => Object.assign(c, basisFromNormal(c.n)));
+
+  function project(cam){
+    const z = cam.z + camDist;
+    const s = (persp / z);
+    return { x: cam.x * s, y: cam.y * s };
+  }
+
+  // ---------- Rendering ----------
+  let hoverCircle = null;
+
+  function draw() {
+    const w = innerWidth, h = innerHeight;
+    ctx.clearRect(0,0,w,h);
+
+    const cx = w*0.5 + panX;
+    const cy = h*0.5 + panY;
+    const R = baseRadius * zoom;
+
+    ctx.beginPath();
+    ctx.arc(cx, cy, R, 0, Math.PI*2);
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = "rgba(0,0,0,0.18)";
+    ctx.stroke();
+
+    ctx.lineWidth = 1;
+    for (const c of circles){
+      ctx.strokeStyle = (hoverCircle === c) ? "rgba(0,0,0,0.55)" : "rgba(0,0,0,0.28)";
+      ctx.beginPath();
+
+      const steps = 240;
+      let started = false;
+      for (let i=0;i<=steps;i++){
+        const t = (i/steps) * Math.PI*2;
+        const pWorld = add(scale(c.u, Math.cos(t)), scale(c.v, Math.sin(t)));
+        const pCam = mulMatVec(rot, pWorld);
+        const p2 = project(pCam);
+        const x = cx + p2.x * R;
+        const y = cy - p2.y * R;
+
+        if (!started){ ctx.moveTo(x,y); started = true; }
+        else ctx.lineTo(x,y);
+      }
+      ctx.stroke();
+    }
+  }
+
+  // ---------- Hit testing ----------
+  function buildCircleScreenPolyline(circle){
+    const w = innerWidth, h = innerHeight;
+    const cx = w*0.5 + panX;
+    const cy = h*0.5 + panY;
+    const R = baseRadius * zoom;
+
+    const pts = [];
+    const steps = 180;
+    for (let i=0;i<=steps;i++){
+      const t = (i/steps)*Math.PI*2;
+      const pWorld = add(scale(circle.u, Math.cos(t)), scale(circle.v, Math.sin(t)));
+      const pCam = mulMatVec(rot, pWorld);
+      const p2 = project(pCam);
+      pts.push({ x: cx + p2.x*R, y: cy - p2.y*R });
+    }
+    return pts;
+  }
+
+  function distPointToSegment(px,py, ax,ay, bx,by){
+    const vx = bx-ax, vy = by-ay;
+    const wx = px-ax, wy = py-ay;
+    const c1 = vx*wx + vy*wy;
+    if (c1 <= 0) return Math.hypot(px-ax, py-ay);
+    const c2 = vx*vx + vy*vy;
+    if (c2 <= c1) return Math.hypot(px-bx, py-by);
+    const t = c1 / c2;
+    const ix = ax + t*vx, iy = ay + t*vy;
+    return Math.hypot(px-ix, py-iy);
+  }
+
+  function pickCircleAt(x,y){
+    const tol = clamp(8 + 6*zoom, 8, 20);
+    let best = null, bestD = Infinity;
+
+    for (const c of circles){
+      const pts = buildCircleScreenPolyline(c);
+      for (let i=0;i<pts.length-1;i++){
+        const d = distPointToSegment(x,y, pts[i].x,pts[i].y, pts[i+1].x,pts[i+1].y);
+        if (d < bestD){
+          bestD = d;
+          best = c;
+        }
+      }
+    }
+    return (bestD <= tol) ? best : null;
+  }
+
+  // ---------- Interaction ----------
+  let draggingCircle = null;
+  let dragLast = null;
+
+  let panning = false;
+  let panLast = null;
+
+  function rotateFromDrag(circle, dx, dy){
+    const nCam = norm(mulMatVec(rot, circle.n));
+    const ax = nCam.x, ay = nCam.y;
+    const amag = Math.hypot(ax, ay);
+
+    let signed = 0;
+    if (amag < 1e-3){
+      signed = dx;
+    } else {
+      const vx = dx, vy = -dy; // y up
+      signed = (ax*vy - ay*vx) / amag;
+    }
+
+    const angle = signed * 0.008;
+    applyWorldAxisRotation(circle.n, angle);
+  }
+
+  canvas.addEventListener('mousemove', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    if (!draggingCircle && !panning){
+      hoverCircle = pickCircleAt(x,y);
+      canvas.style.cursor = hoverCircle ? "grab" : "default";
+      draw();
+      return;
+    }
+
+    if (draggingCircle && dragLast){
+      const dx = x - dragLast.x;
+      const dy = y - dragLast.y;
+      rotateFromDrag(draggingCircle, dx, dy);
+      dragLast = {x,y};
+      canvas.style.cursor = "grabbing";
+      draw();
+    } else if (panning && panLast){
+      panX += (x - panLast.x);
+      panY += (y - panLast.y);
+      panLast = {x,y};
+      draw();
+    }
+  });
+
+  canvas.addEventListener('mousedown', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    if (e.button === 2){
+      panning = true;
+      panLast = {x,y};
+      return;
+    }
+
+    const picked = pickCircleAt(x,y);
+    if (picked){
+      draggingCircle = picked;
+      dragLast = {x,y};
+      canvas.style.cursor = "grabbing";
+    }
+  });
+
+  canvas.addEventListener('mouseup', () => {
+    draggingCircle = null;
+    dragLast = null;
+    panning = false;
+    panLast = null;
+    canvas.style.cursor = hoverCircle ? "grab" : "default";
+  });
+
+  canvas.addEventListener('mouseleave', () => {
+    draggingCircle = null;
+    dragLast = null;
+    panning = false;
+    panLast = null;
+    canvas.style.cursor = "default";
+  });
+
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const delta = Math.sign(e.deltaY);
+    const factor = (delta > 0) ? 0.92 : 1.08;
+    zoom = clamp(zoom * factor, 0.25, 8);
+    draw();
+  }, { passive:false });
+
+  // Touch
+  let touchMode = "none";
+  let tLast1 = null;
+  let pinchDist = 0;
+  let pinchCenter = null;
+
+  function getTouches(e){
+    const rect = canvas.getBoundingClientRect();
+    return Array.from(e.touches).map(t => ({
+      x: t.clientX - rect.left,
+      y: t.clientY - rect.top
+    }));
+  }
+
+  function dist(t0,t1){ return Math.hypot(t1.x - t0.x, t1.y - t0.y); }
+  function center(t0,t1){ return { x:(t0.x+t1.x)/2, y:(t0.y+t1.y)/2 }; }
+
+  canvas.addEventListener('touchstart', (e) => {
+    const ts = getTouches(e);
+
+    if (ts.length === 1){
+      const picked = pickCircleAt(ts[0].x, ts[0].y);
+      if (picked){
+        touchMode = "rotate";
+        draggingCircle = picked;
+        tLast1 = {x: ts[0].x, y: ts[0].y};
+      } else {
+        touchMode = "none";
+        draggingCircle = null;
+        tLast1 = null;
+      }
+    } else if (ts.length === 2){
+      touchMode = "pinchpan";
+      pinchDist = dist(ts[0], ts[1]);
+      pinchCenter = center(ts[0], ts[1]);
+      draggingCircle = null;
+      tLast1 = null;
+    }
+
+    e.preventDefault();
+  }, { passive:false });
+
+  canvas.addEventListener('touchmove', (e) => {
+    const ts = getTouches(e);
+
+    if (touchMode === "rotate" && ts.length === 1 && draggingCircle && tLast1){
+      const dx = ts[0].x - tLast1.x;
+      const dy = ts[0].y - tLast1.y;
+      rotateFromDrag(draggingCircle, dx, dy);
+      tLast1 = {x: ts[0].x, y: ts[0].y};
+      draw();
+      e.preventDefault();
+      return;
+    }
+
+    if (touchMode === "pinchpan" && ts.length === 2){
+      const d = dist(ts[0], ts[1]);
+      const c = center(ts[0], ts[1]);
+
+      const factor = d / (pinchDist || d);
+      zoom = clamp(zoom * factor, 0.25, 8);
+
+      if (pinchCenter){
+        panX += (c.x - pinchCenter.x);
+        panY += (c.y - pinchCenter.y);
+      }
+
+      pinchDist = d;
+      pinchCenter = c;
+
+      draw();
+      e.preventDefault();
+    }
+  }, { passive:false });
+
+  canvas.addEventListener('touchend', (e) => {
+    const n = e.touches.length;
+    if (n === 0){
+      touchMode = "none";
+      draggingCircle = null;
+      tLast1 = null;
+      pinchCenter = null;
+    } else if (n === 1){
+      touchMode = "none";
+      draggingCircle = null;
+      tLast1 = null;
+      pinchCenter = null;
+    }
+    e.preventDefault();
+  }, { passive:false });
+
+  canvas.addEventListener('touchcancel', () => {
+    touchMode = "none";
+    draggingCircle = null;
+    tLast1 = null;
+    pinchCenter = null;
+  }, { passive:false });
+
+  draw();
+})();
+</script>
+</body>
+</html>
