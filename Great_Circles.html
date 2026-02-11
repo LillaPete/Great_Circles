@@ -23,6 +23,10 @@
   <div class="r"><label>X rotation</label><input id="rx" type="range" min="-180" max="180" step="15" value="0"><span class="val" id="rxv">0°</span></div>
   <div class="r"><label>Y rotation</label><input id="ry" type="range" min="-180" max="180" step="15" value="0"><span class="val" id="ryv">0°</span></div>
   <div class="r"><label>Z rotation</label><input id="rz" type="range" min="-180" max="180" step="15" value="0"><span class="val" id="rzv">0°</span></div>
+
+  <!-- ZOOM SLIDER (added) -->
+  <div class="r"><label>Zoom</label><input id="z" type="range" min="0.25" max="3.5" step="0.01" value="1.00"><span class="val" id="zv">1.00×</span></div>
+
   <div class="r"><label>Line opacity</label><input id="o" type="range" min="0.05" max="1" step="0.01" value="0.85"></div>
 
   <div class="r" style="gap:8px;margin-top:10px">
@@ -39,6 +43,10 @@
   const rx = document.getElementById('rx'), ry = document.getElementById('ry'), rz = document.getElementById('rz');
   const rxv = document.getElementById('rxv'), ryv = document.getElementById('ryv'), rzv = document.getElementById('rzv');
   const btnPng = document.getElementById('png'), btnReset = document.getElementById('reset');
+
+  // ZOOM SLIDER (added)
+  const z = document.getElementById('z');
+  const zv = document.getElementById('zv');
 
   const TAU = Math.PI*2, clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
 
@@ -172,6 +180,28 @@
   ry.addEventListener('dblclick', ()=>resetAxisSlider(ry));
   rz.addEventListener('dblclick', ()=>resetAxisSlider(rz));
 
+  // ZOOM SLIDER (added): keep zoom anchored to SCREEN center (independent of object pan).
+  function setZoomCentered(newZoom){
+    newZoom = clamp(newZoom, 0.25, 3.5);
+    const old = zoom;
+    if(Math.abs(newZoom-old) < 1e-9) return;
+
+    // Screen center should remain stable:
+    // world position at screen center is proportional to (-pan)/(R*zoom)
+    // Adjust pan so that world-at-center stays constant when zoom changes.
+    const k = (newZoom / old);
+    panX *= k;
+    panY *= k;
+
+    zoom = newZoom;
+    z.value = String(zoom);
+    if(zv) zv.textContent = `${zoom.toFixed(2)}×`;
+  }
+
+  // Wire slider + keep wheel & slider in sync
+  z.addEventListener('input', ()=> setZoomCentered(parseFloat(z.value || "1")));
+  setZoomCentered(zoom); // initialize label/value
+
 // Input
 let dragging=false, pid=null, lx=0, ly=0;
 let mode='none'; // 'none' | 'circleRotate' | 'pan'
@@ -263,13 +293,6 @@ c.addEventListener('pointermove', e=>{
 
   if(mode!=='circleRotate' || !activeNormal) return;
 
-  // Rotate the sphere around the axis normal to the clicked great circle.
-  // Make direction consistent by basing the signed angle on:
-  // (1) the *current* screen-space projection of the rotation axis, and
-  // (2) the drag vector.
-  //
-  // If the axis points "away" from the camera, the naive mapping can feel like it reverses.
-  // Using the 2D cross product between axis-projection and drag keeps it stable.
   const minWH = Math.min(innerWidth, innerHeight);
 
   // Camera-space axis (after current rotation).
@@ -285,7 +308,6 @@ c.addEventListener('pointermove', e=>{
   const vy = -dy;
 
   // Signed amount of rotation: cross(axisProj, dragVec).
-  // Normalize so sensitivity doesn't explode when the axis is near screen-center.
   const cross = (ax * vy - ay * vx);
   const s = 2.8 / minWH;
   const denom = Math.max(0.15, aLen);
@@ -310,10 +332,15 @@ c.addEventListener('pointercancel', ()=>{
   c.style.cursor = 'default';
 });
 
-c.addEventListener('wheel',e=>{e.preventDefault(); zoom=clamp(zoom*Math.exp(-e.deltaY*0.0012),0.25,3.5);},{passive:false});
+  // Wheel zoom now uses centered zoom and stays synced to slider
+  c.addEventListener('wheel',e=>{
+    e.preventDefault();
+    const nz = clamp(zoom*Math.exp(-e.deltaY*0.0012),0.25,3.5);
+    setZoomCentered(nz);
+  },{passive:false});
 
   const reset=()=>{
-    zoom=1;
+    setZoomCentered(1);
     panX=0; panY=0;
     userRot=qNorm({w:1,x:0,y:0,z:0});
     rx.value='0'; ry.value='0'; rz.value='0';
@@ -323,14 +350,13 @@ c.addEventListener('wheel',e=>{e.preventDefault(); zoom=clamp(zoom*Math.exp(-e.d
   c.addEventListener('dblclick',reset); btnReset.addEventListener('click',reset);
 
   btnPng.addEventListener('click',()=>{
-    // High-res export without fattening the lines.
-    // Tweak this if you want even more pixels (2 = 2x the current canvas resolution).
     const EXPORT_SCALE = 2;
 
     // Save current canvas state
     const oldW = c.width, oldH = c.height;
     const oldStyleW = c.style.width, oldStyleH = c.style.height;
     const oldPanX = panX, oldPanY = panY;
+    const oldZoom = zoom; // (added)
 
     const dpr = Math.max(1, Math.min(2, devicePixelRatio||1));
     const w = Math.floor(innerWidth * dpr * EXPORT_SCALE);
@@ -345,6 +371,7 @@ c.addEventListener('wheel',e=>{e.preventDefault(); zoom=clamp(zoom*Math.exp(-e.d
     // Scale pan to match the larger pixel canvas
     panX = oldPanX * EXPORT_SCALE;
     panY = oldPanY * EXPORT_SCALE;
+    // Keep zoom identical (it already affects scale); no change needed
 
     draw();
 
@@ -358,6 +385,9 @@ c.addEventListener('wheel',e=>{e.preventDefault(); zoom=clamp(zoom*Math.exp(-e.d
     c.style.width = oldStyleW; c.style.height = oldStyleH;
     W = oldW; H = oldH; cx = W/2; cy = H/2; R = Math.min(W,H)*0.42;
     panX = oldPanX; panY = oldPanY;
+    zoom = oldZoom;
+    z.value = String(zoom);
+    if(zv) zv.textContent = `${zoom.toFixed(2)}×`;
   });
 
   function greatCircles(axis, color, on){
@@ -368,17 +398,11 @@ c.addEventListener('wheel',e=>{e.preventDefault(); zoom=clamp(zoom*Math.exp(-e.d
     const baseA=parseFloat(opacity.value);
     const lw = 1*dpr;
 
-    const backA=0.0, dash=[Math.max(3,lw*2.8), Math.max(3,lw*2.2)];
-
     // Small screen-space separation to avoid perfect overlap
     const sep=1.6*dpr*(lw/(1.6*dpr));
     let ox=0,oy=0;
     if(axis==='X'){ox= sep;} else if(axis==='Y'){ox=-sep;} else {oy= sep;}
 
-    // Ensure density=1 yields three principal planes:
-    // Y: XY (z=0) => phase 0
-    // X: XZ (y=0) => phase pi/2
-    // Z: YZ (x=0) => phase pi/2
     const phase = (axis==='X') ? (TAU/4) : (axis==='Y') ? 0 : (TAU/4);
 
     for(let i=0;i<count;i++){
@@ -389,7 +413,6 @@ c.addEventListener('wheel',e=>{e.preventDefault(); zoom=clamp(zoom*Math.exp(-e.d
       else if(axis==='Y'){ a={x:0,y:1,z:0}; b={x:Math.cos(phi),y:0,z:Math.sin(phi)}; }
       else { a={x:0,y:0,z:1}; b={x:Math.cos(phi),y:Math.sin(phi),z:0}; }
 
-      // Object-space normal of this great circle plane (axis to rotate around when clicked)
       const normal = {
         x: a.y*b.z - a.z*b.y,
         y: a.z*b.x - a.x*b.z,
@@ -409,11 +432,9 @@ c.addEventListener('wheel',e=>{e.preventDefault(); zoom=clamp(zoom*Math.exp(-e.d
         const tc=splitZ0(p0,p1);
 
         const segDraw=(A,B,front)=>{
-          // Back hemisphere: faint but visible.
           ctx.globalAlpha = baseA * (front ? 1 : 0.10);
           ctx.setLineDash([]);
           const s0=proj(A,ox,oy), s1=proj(B,ox,oy);
-          // Hit-test segment for click-to-rotate (store both front/back, prefer front when selecting)
           circleHitSegs.push({x1:s0.x,y1:s0.y,x2:s1.x,y2:s1.y, normal, front});
           ctx.beginPath(); ctx.moveTo(s0.x,s0.y); ctx.lineTo(s1.x,s1.y); ctx.stroke();
         };
@@ -436,7 +457,7 @@ c.addEventListener('wheel',e=>{e.preventDefault(); zoom=clamp(zoom*Math.exp(-e.d
       {n:'+X',v:{x:1,y:0,z:0},c:'#ff3b3b'},{n:'-X',v:{x:-1,y:0,z:0},c:'#ff3b3b'},
       {n:'+Y',v:{x:0,y:1,z:0},c:'#3bff65'},{n:'-Y',v:{x:0,y:-1,z:0},c:'#3bff65'},
       {n:'+Z',v:{x:0,y:0,z:1},c:'#3b7bff'},{n:'-Z',v:{x:0,y:0,z:-1},c:'#3b7bff'}
-    ].map(m=>({...m,r:qRot(rot,m.v)})).sort((a,b)=>a.r.z-b.r.z); // back first (z<0), front last
+    ].map(m=>({...m,r:qRot(rot,m.v)})).sort((a,b)=>a.r.z-b.r.z);
 
     ctx.save();
     ctx.font=`${12*dpr}px system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif`;
@@ -477,7 +498,6 @@ c.addEventListener('wheel',e=>{e.preventDefault(); zoom=clamp(zoom*Math.exp(-e.d
     greatCircles('X','#ff3b3b',true);
     greatCircles('Y','#3bff65',true);
     greatCircles('Z','#3b7bff',true);
-
     markers();
   }
 
