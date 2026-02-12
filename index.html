@@ -14,18 +14,20 @@
   button:hover{background:rgba(255,255,255,.12)}
   .val{opacity:.8;min-width:44px;text-align:right}
 </style>
+
 <canvas id="c"></canvas>
+
 <div id="ui">
-  <div class="r"><label>Great circles / axis</label><input id="density" type="range" min="4" max="72" step="4" value="4"></div>
+  <div class="r">
+    <label>Great circles / axis</label>
+    <input id="density" type="range" min="4" max="72" step="4" value="4">
+  </div>
 
-  <!-- step changed to 5 -->
-  <div class="r"><label>X rotation</label><input id="rx" type="range" min="-180" max="180" step="5" value="0"><span class="val" id="rxv">0°</span></div>
-  <div class="r"><label>Y rotation</label><input id="ry" type="range" min="-180" max="180" step="5" value="0"><span class="val" id="ryv">0°</span></div>
-  <div class="r"><label>Z rotation</label><input id="rz" type="range" min="-180" max="180" step="5" value="0"><span class="val" id="rzv">0°</span></div>
-
-  <div class="r"><label>Zoom</label><input id="z" type="range" min="0.25" max="3.5" step="0.01" value="1.00"><span class="val" id="zv">1.00×</span></div>
-
-  <div class="r"><label>Line opacity</label><input id="o" type="range" min="0.05" max="1" step="0.01" value="0.35"></div>
+  <div class="r">
+    <label>Zoom</label>
+    <input id="z" type="range" min="0.25" max="3.5" step="0.01" value="1.00">
+    <span class="val" id="zv">1.00×</span>
+  </div>
 
   <div class="r" style="gap:8px;margin-top:10px">
     <button id="png">Export PNG</button>
@@ -37,14 +39,14 @@
 (() => {
   const c = document.getElementById('c'), ctx = c.getContext('2d');
   const density = document.getElementById('density');
-  const opacity = document.getElementById('o');
-  const rx = document.getElementById('rx'), ry = document.getElementById('ry'), rz = document.getElementById('rz');
-  const rxv = document.getElementById('rxv'), ryv = document.getElementById('ryv'), rzv = document.getElementById('rzv');
   const btnPng = document.getElementById('png'), btnReset = document.getElementById('reset');
   const z = document.getElementById('z');
   const zv = document.getElementById('zv');
 
   const TAU = Math.PI*2, clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+
+  // ===== Fixed line opacity (25%) =====
+  const BASE_OPACITY = 0.25;
 
   // Quaternion (w,x,y,z)
   const qMul=(a,b)=>({w:a.w*b.w-a.x*b.x-a.y*b.y-a.z*b.z,
@@ -60,12 +62,8 @@
 
   let baseRot0 = qNorm({w:1,x:0,y:0,z:0});
   let userRot  = qNorm({w:1,x:0,y:0,z:0});
-  let sliderRot= qNorm({w:1,x:0,y:0,z:0});
   let rot      = qNorm({w:1,x:0,y:0,z:0});
-  const recomputeRot=()=>{ rot = qNorm(qMul(qMul(sliderRot, userRot), baseRot0)); };
-
-  const qInv=(q)=>({w:q.w, x:-q.x, y:-q.y, z:-q.z});
-  const qDot=(a,b)=>(a.w*b.w + a.x*b.x + a.y*b.y + a.z*b.z);
+  const recomputeRot=()=>{ rot = qNorm(qMul(userRot, baseRot0)); };
 
   let circleHitSegs = [];
 
@@ -84,84 +82,6 @@
   const proj=(v,ox=0,oy=0)=>{const s=R*zoom; return {x:cx+panX+v.x*s+ox,y:cy+panY-v.y*s+oy,z:v.z};}
   const splitZ0=(a,b)=>{const d=b.z-a.z; if(Math.abs(d)<1e-9) return null; const t=(0-a.z)/d; return (t>0&&t<1)?t:null;}
 
-  // ===== 5° snapping helpers =====
-  const SNAP_DEG = 5;
-  const snapN = (v)=>Math.round(v/SNAP_DEG)*SNAP_DEG;
-  const clamp180 = (v)=>Math.max(-180, Math.min(180, v));
-
-  function syncRotationSliders(){
-    const fix = (el)=>{
-      let v = parseFloat(el.value || "0");
-      v = clamp180(snapN(v));
-      el.value = String(v);
-    };
-    fix(rx); fix(ry); fix(rz);
-
-    const fmt = (v)=> `${v>0?'+':''}${v}°`;
-    rxv.textContent = fmt(parseInt(rx.value,10));
-    ryv.textContent = fmt(parseInt(ry.value,10));
-    rzv.textContent = fmt(parseInt(rz.value,10));
-  }
-
-  function updateSliderRotation(){
-    const toRad = d => d * Math.PI / 180;
-    const ax = toRad(parseInt(rx.value,10) || 0);
-    const ay = toRad(parseInt(ry.value,10) || 0);
-    const az = toRad(parseInt(rz.value,10) || 0);
-
-    const qx = qFromAxisAngle(1,0,0, ax);
-    const qy = qFromAxisAngle(0,1,0, ay);
-    const qz = qFromAxisAngle(0,0,1, az);
-
-    sliderRot = qNorm(qMul(qMul(qx, qy), qz));
-    recomputeRot();
-  }
-
-  let updatingUI = false;
-  function bestSliderStepsForRotation(){
-    // steps from -180..180 in 5° increments
-    const steps = [];
-    for(let d=-180; d<=180; d+=SNAP_DEG) steps.push(d);
-
-    let best = {rx:0, ry:0, rz:0};
-    let bestScore = -1;
-
-    const target = qNorm(qMul(rot, qInv(baseRot0)));
-    const toRad = d => d * Math.PI / 180;
-
-    for (let ix=0; ix<steps.length; ix++){
-      const qx = qFromAxisAngle(1,0,0, toRad(steps[ix]));
-      for (let iy=0; iy<steps.length; iy++){
-        const qy = qFromAxisAngle(0,1,0, toRad(steps[iy]));
-        for (let iz=0; iz<steps.length; iz++){
-          const qz = qFromAxisAngle(0,0,1, toRad(steps[iz]));
-          const cand = qNorm(qMul(qMul(qx,qy),qz));
-          const score = Math.abs(qDot(cand, target));
-          if (score > bestScore){
-            bestScore = score;
-            best = {rx:steps[ix], ry:steps[iy], rz:steps[iz]};
-          }
-        }
-      }
-    }
-    return best;
-  }
-
-  const onRotUI=()=>{
-    if(updatingUI) return;
-    syncRotationSliders();
-    updateSliderRotation();
-  };
-  density.addEventListener('input', onRotUI);
-  rx.addEventListener('input', onRotUI);
-  ry.addEventListener('input', onRotUI);
-  rz.addEventListener('input', onRotUI);
-
-  const resetAxisSlider = (el)=>{ el.value='0'; syncRotationSliders(); updateSliderRotation(); };
-  rx.addEventListener('dblclick', ()=>resetAxisSlider(rx));
-  ry.addEventListener('dblclick', ()=>resetAxisSlider(ry));
-  rz.addEventListener('dblclick', ()=>resetAxisSlider(rz));
-
   function setZoomCentered(newZoom){
     newZoom = clamp(newZoom, 0.25, 3.5);
     const old = zoom;
@@ -175,22 +95,6 @@
   }
   z.addEventListener('input', ()=> setZoomCentered(parseFloat(z.value || "1")));
   setZoomCentered(zoom);
-
-  function snapRotationToNearestStep(){
-    const b = bestSliderStepsForRotation();
-
-    updatingUI = true;
-    rx.value = String(b.rx);
-    ry.value = String(b.ry);
-    rz.value = String(b.rz);
-    updatingUI = false;
-
-    syncRotationSliders();
-    updateSliderRotation();
-
-    userRot = qNorm({w:1,x:0,y:0,z:0});
-    recomputeRot();
-  }
 
   // Input
   let dragging=false, pid=null, lx=0, ly=0;
@@ -296,27 +200,20 @@
     const qA = qFromAxisAngle(activeNormal.x, activeNormal.y, activeNormal.z, ang);
     userRot = qNorm(qMul(userRot, qA));
     recomputeRot();
-    // no slider updates here: snap on release
   });
 
   c.addEventListener('pointerup', e=>{
     if(e.pointerId===pid){
-      const wasCircleRotate = (mode === 'circleRotate');
-
       dragging=false; pid=null;
       mode='none'; activeNormal=null;
       c.style.cursor='default';
-
-      if(wasCircleRotate) snapRotationToNearestStep();
     }
   });
 
   c.addEventListener('pointercancel', ()=>{
-    const wasCircleRotate = (mode === 'circleRotate');
     dragging=false; pid=null;
     mode='none'; activeNormal=null;
     c.style.cursor='default';
-    if(wasCircleRotate) snapRotationToNearestStep();
   });
 
   c.addEventListener('wheel',e=>{
@@ -329,9 +226,7 @@
     setZoomCentered(1);
     panX=0; panY=0;
     userRot=qNorm({w:1,x:0,y:0,z:0});
-    rx.value='0'; ry.value='0'; rz.value='0';
-    syncRotationSliders();
-    updateSliderRotation();
+    recomputeRot();
   };
   c.addEventListener('dblclick',reset);
   btnReset.addEventListener('click',reset);
@@ -377,7 +272,7 @@
 
     const dpr=Math.max(1,Math.min(2,devicePixelRatio||1));
     const count=parseInt(density.value,10);
-    const baseA=parseFloat(opacity.value);
+    const baseA=BASE_OPACITY;
     const lw = 1*dpr;
 
     const sep=1.6*dpr*(lw/(1.6*dpr));
@@ -481,8 +376,8 @@
     markers();
   }
 
-  syncRotationSliders();
-  updateSliderRotation();
+  // keep things sane
+  recomputeRot();
 
   (function loop(){ draw(); requestAnimationFrame(loop); })();
 })();
