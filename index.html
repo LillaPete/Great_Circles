@@ -247,8 +247,8 @@ const hitGreatCircle = (e)=>{
   return best; // {normal:{x,y,z}, front, ...}
 };
 
-// Disable the browser context menu so right-click can be used for panning.
-c.addEventListener('contextmenu', e=>{ e.preventDefault(); });
+// Add near your other pointer-state vars
+let activeFront = true; // optional, but useful for clarity
 
 c.addEventListener('pointerdown', e=>{
   c.setPointerCapture(e.pointerId);
@@ -259,17 +259,22 @@ c.addEventListener('pointerdown', e=>{
     return;
   }
 
-  // Left click: rotate ONLY if a great-circle line was clicked.
   const hit = hitGreatCircle(e);
   if(hit){
     mode='circleRotate';
-    activeNormal = hit.normal; // object-space normal of the clicked circle plane
+
+    // 👇 KEY CHANGE: if we clicked a back segment, flip the normal
+    activeFront = hit.front;
+    const n = hit.normal;
+    activeNormal = hit.front ? n : { x:-n.x, y:-n.y, z:-n.z };
+
     c.style.cursor = 'grabbing';
   }else{
     mode='none';
     activeNormal = null;
   }
 });
+
 
 c.addEventListener('pointermove', e=>{
   // Hover affordance (not dragging)
