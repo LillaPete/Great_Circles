@@ -9,25 +9,23 @@
   #ui .r{display:flex;align-items:center;gap:10px;margin:8px 0}
   #ui label{opacity:.9;min-width:140px}
   #ui input[type="range"]{width:160px}
-  #ui .tog{display:flex;gap:10px;margin:8px 0}
   button{border:1px solid rgba(255,255,255,.16);background:rgba(255,255,255,.08);color:#fff;
          border-radius:10px;padding:7px 10px;font-size:12px;cursor:pointer}
   button:hover{background:rgba(255,255,255,.12)}
-  .dot{width:10px;height:10px;border-radius:50%;display:inline-block}
   .val{opacity:.8;min-width:44px;text-align:right}
 </style>
 <canvas id="c"></canvas>
 <div id="ui">
   <div class="r"><label>Great circles / axis</label><input id="density" type="range" min="4" max="72" step="4" value="4"></div>
 
-  <div class="r"><label>X rotation</label><input id="rx" type="range" min="-180" max="180" step="15" value="0"><span class="val" id="rxv">0°</span></div>
-  <div class="r"><label>Y rotation</label><input id="ry" type="range" min="-180" max="180" step="15" value="0"><span class="val" id="ryv">0°</span></div>
-  <div class="r"><label>Z rotation</label><input id="rz" type="range" min="-180" max="180" step="15" value="0"><span class="val" id="rzv">0°</span></div>
+  <!-- step changed to 5 -->
+  <div class="r"><label>X rotation</label><input id="rx" type="range" min="-180" max="180" step="5" value="0"><span class="val" id="rxv">0°</span></div>
+  <div class="r"><label>Y rotation</label><input id="ry" type="range" min="-180" max="180" step="5" value="0"><span class="val" id="ryv">0°</span></div>
+  <div class="r"><label>Z rotation</label><input id="rz" type="range" min="-180" max="180" step="5" value="0"><span class="val" id="rzv">0°</span></div>
 
-  <!-- ZOOM SLIDER (added) -->
   <div class="r"><label>Zoom</label><input id="z" type="range" min="0.25" max="3.5" step="0.01" value="1.00"><span class="val" id="zv">1.00×</span></div>
 
-  <div class="r"><label>Line opacity</label><input id="o" type="range" min="0.05" max="1" step="0.01" value="0.85"></div>
+  <div class="r"><label>Line opacity</label><input id="o" type="range" min="0.05" max="1" step="0.01" value="0.35"></div>
 
   <div class="r" style="gap:8px;margin-top:10px">
     <button id="png">Export PNG</button>
@@ -43,8 +41,6 @@
   const rx = document.getElementById('rx'), ry = document.getElementById('ry'), rz = document.getElementById('rz');
   const rxv = document.getElementById('rxv'), ryv = document.getElementById('ryv'), rzv = document.getElementById('rzv');
   const btnPng = document.getElementById('png'), btnReset = document.getElementById('reset');
-
-  // ZOOM SLIDER (added)
   const z = document.getElementById('z');
   const zv = document.getElementById('zv');
 
@@ -62,21 +58,19 @@
     const tx=2*(qy*v.z-qz*v.y), ty=2*(qz*v.x-qx*v.z), tz=2*(qx*v.y-qy*v.x);
     return {x:v.x+qw*tx+(qy*tz-qz*ty), y:v.y+qw*ty+(qz*tx-qx*tz), z:v.z+qw*tz+(qx*ty-qy*tx)};}
 
-  // View: looking along +Z, with +Y up, +X right => identity.
   let baseRot0 = qNorm({w:1,x:0,y:0,z:0});
-  let userRot  = qNorm({w:1,x:0,y:0,z:0});  // drag rotation
-  let sliderRot= qNorm({w:1,x:0,y:0,z:0});  // snapped discrete rotation from sliders
-  let rot      = qNorm({w:1,x:0,y:0,z:0});  // combined
+  let userRot  = qNorm({w:1,x:0,y:0,z:0});
+  let sliderRot= qNorm({w:1,x:0,y:0,z:0});
+  let rot      = qNorm({w:1,x:0,y:0,z:0});
   const recomputeRot=()=>{ rot = qNorm(qMul(qMul(sliderRot, userRot), baseRot0)); };
 
-  const qInv=(q)=>({w:q.w, x:-q.x, y:-q.y, z:-q.z}); // unit quaternion inverse
+  const qInv=(q)=>({w:q.w, x:-q.x, y:-q.y, z:-q.z});
   const qDot=(a,b)=>(a.w*b.w + a.x*b.x + a.y*b.y + a.z*b.z);
 
-  // Great-circle hit-testing cache (canvas px segments)
   let circleHitSegs = [];
 
   let W=0,H=0,cx=0,cy=0,R=0,zoom=1;
-  let panX=0, panY=0; // canvas-pixel pan offset
+  let panX=0, panY=0;
   const SEG=220, ts=[...Array(SEG+1)].map((_,i)=>i/SEG*TAU);
 
   function resize(){
@@ -87,17 +81,18 @@
   }
   addEventListener('resize', resize, {passive:true}); resize();
 
-  // Front hemisphere is z >= 0 (+Z faces camera).
   const proj=(v,ox=0,oy=0)=>{const s=R*zoom; return {x:cx+panX+v.x*s+ox,y:cy+panY-v.y*s+oy,z:v.z};}
   const splitZ0=(a,b)=>{const d=b.z-a.z; if(Math.abs(d)<1e-9) return null; const t=(0-a.z)/d; return (t>0&&t<1)?t:null;}
 
+  // ===== 5° snapping helpers =====
+  const SNAP_DEG = 5;
+  const snapN = (v)=>Math.round(v/SNAP_DEG)*SNAP_DEG;
+  const clamp180 = (v)=>Math.max(-180, Math.min(180, v));
+
   function syncRotationSliders(){
-    // Rotation sliders are centered: -180° .. +180° in 15° increments.
-    const snap15 = (v)=>Math.round(v/15)*15;
-    const clamp180 = (v)=>Math.max(-180, Math.min(180, v));
     const fix = (el)=>{
       let v = parseFloat(el.value || "0");
-      v = clamp180(snap15(v));
+      v = clamp180(snapN(v));
       el.value = String(v);
     };
     fix(rx); fix(ry); fix(rz);
@@ -109,7 +104,6 @@
   }
 
   function updateSliderRotation(){
-    // Sliders are degrees (-180..180 step 15), applied about the SPHERE axes (body-fixed).
     const toRad = d => d * Math.PI / 180;
     const ax = toRad(parseInt(rx.value,10) || 0);
     const ay = toRad(parseInt(ry.value,10) || 0);
@@ -119,21 +113,19 @@
     const qy = qFromAxisAngle(0,1,0, ay);
     const qz = qFromAxisAngle(0,0,1, az);
 
-    // Body-fixed rotations: X then Y then Z => q = qx * qy * qz
     sliderRot = qNorm(qMul(qMul(qx, qy), qz));
     recomputeRot();
   }
 
-  // Decompose current combined rotation to nearest snapped steps for the sliders.
   let updatingUI = false;
   function bestSliderStepsForRotation(){
-    // Closest (rx,ry,rz) in 15° increments within [-180,180] to current rotation.
-    // Compare quaternions by maximizing |dot| (same rotation up to sign).
-    const steps = [-180,-165,-150,-135,-120,-105,-90,-75,-60,-45,-30,-15,0,15,30,45,60,75,90,105,120,135,150,165,180];
+    // steps from -180..180 in 5° increments
+    const steps = [];
+    for(let d=-180; d<=180; d+=SNAP_DEG) steps.push(d);
+
     let best = {rx:0, ry:0, rz:0};
     let bestScore = -1;
 
-    // Snap sliders to approximate the CURRENT overall sphere orientation (body-fixed axes).
     const target = qNorm(qMul(rot, qInv(baseRot0)));
     const toRad = d => d * Math.PI / 180;
 
@@ -143,7 +135,7 @@
         const qy = qFromAxisAngle(0,1,0, toRad(steps[iy]));
         for (let iz=0; iz<steps.length; iz++){
           const qz = qFromAxisAngle(0,0,1, toRad(steps[iz]));
-          const cand = qNorm(qMul(qMul(qx,qy),qz)); // body-fixed
+          const cand = qNorm(qMul(qMul(qx,qy),qz));
           const score = Math.abs(qDot(cand, target));
           if (score > bestScore){
             bestScore = score;
@@ -153,16 +145,6 @@
       }
     }
     return best;
-  }
-
-  function updateSlidersFromCurrentRotation(){
-    const b = bestSliderStepsForRotation();
-    updatingUI = true;
-    rx.value = String(b.rx);
-    ry.value = String(b.ry);
-    rz.value = String(b.rz);
-    updatingUI = false;
-    syncRotationSliders();
   }
 
   const onRotUI=()=>{
@@ -180,164 +162,163 @@
   ry.addEventListener('dblclick', ()=>resetAxisSlider(ry));
   rz.addEventListener('dblclick', ()=>resetAxisSlider(rz));
 
-  // ZOOM SLIDER (added): keep zoom anchored to SCREEN center (independent of object pan).
   function setZoomCentered(newZoom){
     newZoom = clamp(newZoom, 0.25, 3.5);
     const old = zoom;
     if(Math.abs(newZoom-old) < 1e-9) return;
-
-    // Screen center should remain stable:
-    // world position at screen center is proportional to (-pan)/(R*zoom)
-    // Adjust pan so that world-at-center stays constant when zoom changes.
     const k = (newZoom / old);
     panX *= k;
     panY *= k;
-
     zoom = newZoom;
     z.value = String(zoom);
     if(zv) zv.textContent = `${zoom.toFixed(2)}×`;
   }
-
-  // Wire slider + keep wheel & slider in sync
   z.addEventListener('input', ()=> setZoomCentered(parseFloat(z.value || "1")));
-  setZoomCentered(zoom); // initialize label/value
+  setZoomCentered(zoom);
 
-// Input
-let dragging=false, pid=null, lx=0, ly=0;
-let mode='none'; // 'none' | 'circleRotate' | 'pan'
-let activeNormal=null; // {x,y,z} in OBJECT space for the clicked great circle
+  function snapRotationToNearestStep(){
+    const b = bestSliderStepsForRotation();
 
-const toCanvasXY = (e)=>{
-  const sx = e.clientX * (c.width / innerWidth);
-  const sy = e.clientY * (c.height / innerHeight);
-  return {x:sx, y:sy};
-};
+    updatingUI = true;
+    rx.value = String(b.rx);
+    ry.value = String(b.ry);
+    rz.value = String(b.rz);
+    updatingUI = false;
 
-const distPointSeg2 = (px,py,x1,y1,x2,y2)=>{
-  const vx=x2-x1, vy=y2-y1;
-  const wx=px-x1, wy=py-y1;
-  const c1 = vx*wx + vy*wy;
-  if(c1<=0) return (px-x1)*(px-x1)+(py-y1)*(py-y1);
-  const c2 = vx*vx + vy*vy;
-  if(c2<=c1) return (px-x2)*(px-x2)+(py-y2)*(py-y2);
-  const t = c1 / (c2||1);
-  const bx = x1 + t*vx, by = y1 + t*vy;
-  return (px-bx)*(px-bx)+(py-by)*(py-by);
-};
+    syncRotationSliders();
+    updateSliderRotation();
 
-const hitGreatCircle = (e)=>{
-  const p = toCanvasXY(e);
-  const dpr=Math.max(1,Math.min(2,devicePixelRatio||1));
-  const thresh2 = (7*dpr)*(7*dpr);
+    userRot = qNorm({w:1,x:0,y:0,z:0});
+    recomputeRot();
+  }
 
-  let best=null, bestD=1e18;
+  // Input
+  let dragging=false, pid=null, lx=0, ly=0;
+  let mode='none';
+  let activeNormal=null;
 
-  // Prefer front hemisphere segments (front=true) if both exist.
-  for(const seg of circleHitSegs){
-    const d2 = distPointSeg2(p.x,p.y, seg.x1,seg.y1,seg.x2,seg.y2);
-    if(d2<=thresh2){
-      const bias = seg.front ? 0 : 1e6; // make back segments lose unless nothing else fits
-      const score = d2 + bias;
-      if(score < bestD){
-        bestD = score;
-        best = seg;
+  const toCanvasXY = (e)=>{
+    const sx = e.clientX * (c.width / innerWidth);
+    const sy = e.clientY * (c.height / innerHeight);
+    return {x:sx, y:sy};
+  };
+
+  const distPointSeg2 = (px,py,x1,y1,x2,y2)=>{
+    const vx=x2-x1, vy=y2-y1;
+    const wx=px-x1, wy=py-y1;
+    const c1 = vx*wx + vy*wy;
+    if(c1<=0) return (px-x1)*(px-x1)+(py-y1)*(py-y1);
+    const c2 = vx*vx + vy*vy;
+    if(c2<=c1) return (px-x2)*(px-x2)+(py-y2)*(py-y2);
+    const t = c1 / (c2||1);
+    const bx = x1 + t*vx, by = y1 + t*vy;
+    return (px-bx)*(px-bx)+(py-by)*(py-by);
+  };
+
+  const hitGreatCircle = (e)=>{
+    const p = toCanvasXY(e);
+    const dpr=Math.max(1,Math.min(2,devicePixelRatio||1));
+    const thresh2 = (7*dpr)*(7*dpr);
+
+    let best=null, bestD=1e18;
+    for(const seg of circleHitSegs){
+      const d2 = distPointSeg2(p.x,p.y, seg.x1,seg.y1, seg.x2,seg.y2);
+      if(d2<=thresh2){
+        const bias = seg.front ? 0 : 1e6;
+        const score = d2 + bias;
+        if(score < bestD){
+          bestD = score;
+          best = seg;
+        }
       }
     }
-  }
-  return best; // {normal:{x,y,z}, front, ...}
-};
+    return best;
+  };
 
-// Add near your other pointer-state vars
-let activeFront = true; // optional, but useful for clarity
+  c.addEventListener('contextmenu', e=>{ e.preventDefault(); });
 
-c.addEventListener('pointerdown', e=>{
-  c.setPointerCapture(e.pointerId);
-  dragging=true; pid=e.pointerId; lx=e.clientX; ly=e.clientY;
+  c.addEventListener('pointerdown', e=>{
+    c.setPointerCapture(e.pointerId);
+    dragging=true; pid=e.pointerId; lx=e.clientX; ly=e.clientY;
 
-  if(e.button===2){
-    mode='pan';
-    return;
-  }
+    if(e.button===2){ mode='pan'; return; }
 
-  const hit = hitGreatCircle(e);
-  if(hit){
-    mode='circleRotate';
-
-    // 👇 KEY CHANGE: if we clicked a back segment, flip the normal
-    activeFront = hit.front;
-    const n = hit.normal;
-    activeNormal = hit.front ? n : { x:-n.x, y:-n.y, z:-n.z };
-
-    c.style.cursor = 'grabbing';
-  }else{
-    mode='none';
-    activeNormal = null;
-  }
-});
-
-
-c.addEventListener('pointermove', e=>{
-  // Hover affordance (not dragging)
-  if(!dragging){
     const hit = hitGreatCircle(e);
-    c.style.cursor = hit ? 'grab' : 'default';
-    return;
-  }
+    if(hit){
+      mode='circleRotate';
 
-  if(e.pointerId!==pid) return;
-  const dx=e.clientX-lx, dy=e.clientY-ly; lx=e.clientX; ly=e.clientY;
+      // Flip normal if back hemisphere clicked so direction matches front
+      const n = hit.normal;
+      activeNormal = hit.front ? n : {x:-n.x, y:-n.y, z:-n.z};
 
-  if(mode==='pan'){
-    // Convert CSS px -> canvas px (canvas is DPR-scaled)
-    const scaleX = c.width / innerWidth;
-    const scaleY = c.height / innerHeight;
-    panX += dx * scaleX;
-    panY += dy * scaleY;
-    return;
-  }
+      c.style.cursor='grabbing';
+    }else{
+      mode='none';
+      activeNormal=null;
+    }
+  });
 
-  if(mode!=='circleRotate' || !activeNormal) return;
+  c.addEventListener('pointermove', e=>{
+    if(!dragging){
+      const hit = hitGreatCircle(e);
+      c.style.cursor = hit ? 'grab' : 'default';
+      return;
+    }
+    if(e.pointerId!==pid) return;
 
-  const minWH = Math.min(innerWidth, innerHeight);
+    const dx=e.clientX-lx, dy=e.clientY-ly; lx=e.clientX; ly=e.clientY;
 
-  // Camera-space axis (after current rotation).
-  const axisCam = qRot(rot, activeNormal);
+    if(mode==='pan'){
+      const scaleX = c.width / innerWidth;
+      const scaleY = c.height / innerHeight;
+      panX += dx * scaleX;
+      panY += dy * scaleY;
+      return;
+    }
 
-  // Project axis onto the screen plane (x,y). Compensate for screen Y being downward.
-  const ax = axisCam.x;
-  const ay = axisCam.y;
-  const aLen = Math.hypot(ax, ay);
+    if(mode!=='circleRotate' || !activeNormal) return;
 
-  // Drag vector in screen coords; convert to "world-ish" screen plane by flipping Y.
-  const vx = dx;
-  const vy = -dy;
+    const minWH = Math.min(innerWidth, innerHeight);
+    const axisCam = qRot(rot, activeNormal);
 
-  // Signed amount of rotation: cross(axisProj, dragVec).
-  const cross = (ax * vy - ay * vx);
-  const s = 2.8 / minWH;
-  const denom = Math.max(0.15, aLen);
-  const ang = -cross * s / denom;
+    const ax = axisCam.x;
+    const ay = axisCam.y;
+    const aLen = Math.hypot(ax, ay);
 
-  const qA = qFromAxisAngle(activeNormal.x, activeNormal.y, activeNormal.z, ang);
-  userRot = qNorm(qMul(userRot, qA));
-  recomputeRot();
-  updateSlidersFromCurrentRotation();
-});
+    const vx = dx;
+    const vy = -dy;
 
-c.addEventListener('pointerup', e=>{
-  if(e.pointerId===pid){
+    const cross = (ax * vy - ay * vx);
+    const s = 2.8 / minWH;
+    const denom = Math.max(0.15, aLen);
+    const ang = -cross * s / denom;
+
+    const qA = qFromAxisAngle(activeNormal.x, activeNormal.y, activeNormal.z, ang);
+    userRot = qNorm(qMul(userRot, qA));
+    recomputeRot();
+    // no slider updates here: snap on release
+  });
+
+  c.addEventListener('pointerup', e=>{
+    if(e.pointerId===pid){
+      const wasCircleRotate = (mode === 'circleRotate');
+
+      dragging=false; pid=null;
+      mode='none'; activeNormal=null;
+      c.style.cursor='default';
+
+      if(wasCircleRotate) snapRotationToNearestStep();
+    }
+  });
+
+  c.addEventListener('pointercancel', ()=>{
+    const wasCircleRotate = (mode === 'circleRotate');
     dragging=false; pid=null;
     mode='none'; activeNormal=null;
-    c.style.cursor = 'default';
-  }
-});
-c.addEventListener('pointercancel', ()=>{
-  dragging=false; pid=null;
-  mode='none'; activeNormal=null;
-  c.style.cursor = 'default';
-});
+    c.style.cursor='default';
+    if(wasCircleRotate) snapRotationToNearestStep();
+  });
 
-  // Wheel zoom now uses centered zoom and stays synced to slider
   c.addEventListener('wheel',e=>{
     e.preventDefault();
     const nz = clamp(zoom*Math.exp(-e.deltaY*0.0012),0.25,3.5);
@@ -352,31 +333,28 @@ c.addEventListener('pointercancel', ()=>{
     syncRotationSliders();
     updateSliderRotation();
   };
-  c.addEventListener('dblclick',reset); btnReset.addEventListener('click',reset);
+  c.addEventListener('dblclick',reset);
+  btnReset.addEventListener('click',reset);
 
   btnPng.addEventListener('click',()=>{
     const EXPORT_SCALE = 2;
 
-    // Save current canvas state
     const oldW = c.width, oldH = c.height;
     const oldStyleW = c.style.width, oldStyleH = c.style.height;
     const oldPanX = panX, oldPanY = panY;
-    const oldZoom = zoom; // (added)
+    const oldZoom = zoom;
 
     const dpr = Math.max(1, Math.min(2, devicePixelRatio||1));
     const w = Math.floor(innerWidth * dpr * EXPORT_SCALE);
     const h = Math.floor(innerHeight * dpr * EXPORT_SCALE);
 
-    // Upscale canvas for export
     c.width = w; c.height = h;
     c.style.width = innerWidth + 'px';
     c.style.height = innerHeight + 'px';
     W = w; H = h; cx = W/2; cy = H/2; R = Math.min(W,H)*0.42;
 
-    // Scale pan to match the larger pixel canvas
     panX = oldPanX * EXPORT_SCALE;
     panY = oldPanY * EXPORT_SCALE;
-    // Keep zoom identical (it already affects scale); no change needed
 
     draw();
 
@@ -385,7 +363,6 @@ c.addEventListener('pointercancel', ()=>{
     a.download='sphere-guide@'+EXPORT_SCALE+'x.png';
     document.body.appendChild(a); a.click(); a.remove();
 
-    // Restore canvas
     c.width = oldW; c.height = oldH;
     c.style.width = oldStyleW; c.style.height = oldStyleH;
     W = oldW; H = oldH; cx = W/2; cy = H/2; R = Math.min(W,H)*0.42;
@@ -403,7 +380,6 @@ c.addEventListener('pointercancel', ()=>{
     const baseA=parseFloat(opacity.value);
     const lw = 1*dpr;
 
-    // Small screen-space separation to avoid perfect overlap
     const sep=1.6*dpr*(lw/(1.6*dpr));
     let ox=0,oy=0;
     if(axis==='X'){ox= sep;} else if(axis==='Y'){ox=-sep;} else {oy= sep;}
@@ -438,7 +414,6 @@ c.addEventListener('pointercancel', ()=>{
 
         const segDraw=(A,B,front)=>{
           ctx.globalAlpha = baseA * (front ? 1 : 0.10);
-          ctx.setLineDash([]);
           const s0=proj(A,ox,oy), s1=proj(B,ox,oy);
           circleHitSegs.push({x1:s0.x,y1:s0.y,x2:s1.x,y2:s1.y, normal, front});
           ctx.beginPath(); ctx.moveTo(s0.x,s0.y); ctx.lineTo(s1.x,s1.y); ctx.stroke();
@@ -453,7 +428,7 @@ c.addEventListener('pointercancel', ()=>{
         }
       }
     }
-    ctx.setLineDash([]); ctx.globalAlpha=1;
+    ctx.globalAlpha=1;
   }
 
   function markers(){
@@ -506,7 +481,6 @@ c.addEventListener('pointercancel', ()=>{
     markers();
   }
 
-  // Init
   syncRotationSliders();
   updateSliderRotation();
 
